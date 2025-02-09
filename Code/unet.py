@@ -151,7 +151,7 @@ if __name__ == "__main__":
    
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Resize((360, 640)),
+        transforms.Resize((128, 128)),
         transforms.Normalize((0.5,), (0.5,))
     ])
 
