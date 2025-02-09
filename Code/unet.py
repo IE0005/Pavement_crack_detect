@@ -1,14 +1,12 @@
 import os
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.optim as optim
 import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
-import matplotlib.pyplot as plt
-
 
 class CrackDataset(Dataset):
     def __init__(self, data_dir, transform=None):
@@ -33,9 +31,9 @@ class CrackDataset(Dataset):
 
         return image, mask
 
-class SegNet(nn.Module):
-    def __init__(self, in_channels=3, out_channels=2):
-        super(SegNet, self).__init__()
+class UNet(nn.Module):
+    def __init__(self, in_channels=3, out_channels=1):
+        super().__init__()
 
         def conv_block(in_ch, out_ch):
             return nn.Sequential(
@@ -47,50 +45,58 @@ class SegNet(nn.Module):
                 nn.ReLU(inplace=True),
             )
 
-        self.encoder = nn.ModuleList([
-            conv_block(in_channels, 64),
-            conv_block(64, 128),
-            conv_block(128, 256),
-            conv_block(256, 512),
-            conv_block(512, 512)
-        ])
+        # Encoder
+        self.enc1 = conv_block(in_channels, 64)
+        self.enc2 = conv_block(64, 128)
+        self.enc3 = conv_block(128, 256)
+        self.enc4 = conv_block(256, 512)
 
-        self.pool = nn.MaxPool2d(2, 2, return_indices=True)
+        self.pool = nn.MaxPool2d(2, 2)
 
-        self.decoder = nn.ModuleList([
-            conv_block(512, 512),
-            conv_block(512, 256),
-            conv_block(256, 128),
-            conv_block(128, 64),
-            conv_block(64, out_channels)
-        ])
+        # Bottleneck
+        self.bottleneck = conv_block(512, 1024)
 
-        self.unpool = nn.MaxUnpool2d(2, stride=2)
+        # Decoder
+        self.up4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
+        self.dec4 = conv_block(1024, 512)
+
+        self.up3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.dec3 = conv_block(512, 256)
+
+        self.up2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.dec2 = conv_block(256, 128)
+
+        self.up1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.dec1 = conv_block(128, 64)
+
+        self.out_conv = nn.Conv2d(64, out_channels, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        indices, sizes = [], []
-        for enc in self.encoder:
-            x = enc(x)
-            sizes.append(x.size())
-            x, ind = self.pool(x)
-            indices.append(ind)
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool(e1))
+        e3 = self.enc3(self.pool(e2))
+        e4 = self.enc4(self.pool(e3))
 
-        for dec in self.decoder:
-            x = self.unpool(x, indices.pop(), output_size=sizes.pop())
-            x = dec(x)
+        b = self.bottleneck(self.pool(e4))
 
-        return F.softmax(x, dim=1)
+        d4 = self.dec4(torch.cat([self.up4(b), e4], dim=1))
+        d3 = self.dec3(torch.cat([self.up3(d4), e3], dim=1))
+        d2 = self.dec2(torch.cat([self.up2(d3), e2], dim=1))
+        d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
+
+        return self.sigmoid(self.out_conv(d1))
 
 
 def train_model(model, train_loader, valid_loader, device, epochs=10):
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    loss_fn = nn.CrossEntropyLoss()
-    
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    loss_fn = nn.BCEWithLogitsLoss()
+
     for epoch in range(epochs):
         model.train()
         total_loss = 0
         for images, masks in train_loader:
-            images, masks = images.to(device), masks.long().to(device).squeeze(1)
+            images, masks = images.to(device), masks.to(device)
             optimizer.zero_grad()
             output = model(images)
             loss = loss_fn(output, masks)
@@ -105,16 +111,17 @@ def train_model(model, train_loader, valid_loader, device, epochs=10):
 def validate_model(model, valid_loader, device):
     model.eval()
     total_loss = 0
-    loss_fn = nn.CrossEntropyLoss()
-    
+    loss_fn = nn.BCEWithLogitsLoss()
+
     with torch.no_grad():
         for images, masks in valid_loader:
-            images, masks = images.to(device), masks.long().to(device).squeeze(1)
+            images, masks = images.to(device), masks.to(device)
             output = model(images)
             loss = loss_fn(output, masks)
             total_loss += loss.item()
 
     print(f"Validation Loss: {total_loss/len(valid_loader):.4f}")
+
 
 def evaluate_model(model, test_loader, device):
     model.eval()
@@ -122,9 +129,10 @@ def evaluate_model(model, test_loader, device):
 
     with torch.no_grad():
         for images, masks in test_loader:
-            images, masks = images.to(device), masks.long().to(device).squeeze(1)
+            images, masks = images.to(device), masks.to(device)
             outputs = model(images)
-            preds = torch.argmax(outputs, dim=1).cpu().numpy().flatten()
+            preds = torch.sigmoid(outputs) > 0.5
+            preds = preds.cpu().numpy().flatten()
             masks = masks.cpu().numpy().flatten()
 
             f1_scores.append(f1_score(masks, preds))
@@ -134,21 +142,7 @@ def evaluate_model(model, test_loader, device):
 
     print(f"Avg F1: {np.mean(f1_scores):.4f}, Acc: {np.mean(acc_scores):.4f}, Precision: {np.mean(prec_scores):.4f}, Recall: {np.mean(rec_scores):.4f}")
 
-
-def save_prediction(tensor, path):
-    img = torch.argmax(tensor, dim=1).squeeze().cpu().numpy() * 255
-    Image.fromarray(img.astype(np.uint8)).save(path)
-
-def save_input(image, path):
-    img = image.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255
-    Image.fromarray(img.astype(np.uint8)).save(path)
-
-def save_mask(mask, path):
-    img = mask.squeeze().cpu().numpy() * 255
-    Image.fromarray(img.astype(np.uint8)).save(path)
-
 if __name__ == "__main__":
-    # Paths
     data_path = "/CRACK500_unzip"
     train_folder = os.path.join(data_path, "traincrop/traincrop")
     validation_folder = os.path.join(data_path, "valcrop/valcrop")
@@ -161,7 +155,7 @@ if __name__ == "__main__":
         transforms.Normalize((0.5,), (0.5,))
     ])
 
-    
+ 
     train_ds = CrackDataset(train_folder, transform)
     valid_ds = CrackDataset(validation_folder, transform)
     test_ds = CrackDataset(test_folder, transform)
@@ -170,13 +164,12 @@ if __name__ == "__main__":
     valid_loader = DataLoader(valid_ds, batch_size=8, shuffle=True)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
 
-    
+   
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SegNet().to(device)
+    model = UNet().to(device)
 
-  
+   
     train_model(model, train_loader, valid_loader, device, epochs=10)
     evaluate_model(model, test_loader, device)
 
-    
-    torch.save(model.state_dict(), "segnet_crack_detection.pth")
+    torch.save(model.state_dict(), "unet_crack_detection.pth")
