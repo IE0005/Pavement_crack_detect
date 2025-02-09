@@ -6,6 +6,8 @@ Crack500 dataset [1]: The RGB image (Input) and Segmented Image (Desired Output)
 ![Crack Detection Example](assets/crack500.png)
 
 Pavement Crack detection result example: 
+
+
 ![Results](assets/Pavement_Crack_Detection.png)
 
 [1] [7]	Ran, R., Xu, X., Qiu, S., Cui, X. and Wu, F., 2021, October. Crack-SegNet: Surface Crack Detection in Complex Background Using Encoder-Decoder Architecture. In 2021 4th International Conference on Sensors, Signal and Image Processing (pp. 15-22). 
